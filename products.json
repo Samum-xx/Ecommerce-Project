@@ -1,0 +1,19 @@
+{
+  "categories": [
+    {
+      "name": "Электроника",
+      "description": "Телефоны, ноутбуки, планшеты",
+      "products": [
+        {"name": "Смартфон X", "description": "Флагманский смартфон", "price": 65000.50, "quantity": 15},
+        {"name": "Планшет Y", "description": "Планшет для работы", "price": 42000.00, "quantity": 8}
+      ]
+    },
+    {
+      "name": "Книги",
+      "description": "Художественная литература",
+      "products": [
+        {"name": "Книга про Python", "description": "Для начинающих", "price": 990.00, "quantity": 50}
+      ]
+    }
+  ]
+}
