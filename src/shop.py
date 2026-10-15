@@ -1,8 +1,14 @@
-# src/shop.py
 from typing import List, Optional
 
+
 class Product:
-    def __init__(self, name: str, description: str, price: float, quantity: int):
+    def __init__(
+        self,
+        name: str,
+        description: str,
+        price: float,
+        quantity: int,
+    ) -> None:
         self.name = name
         self.description = description
         self.price = price
@@ -13,10 +19,19 @@ class Category:
     category_count = 0
     product_count = 0
 
-    def __init__(self, name: str, description: str, products: Optional[List[Product]] = None):
+    def __init__(
+        self,
+        name: str,
+        description: str,
+        products: Optional[List[Product]] = None,
+    ) -> None:
         self.name = name
         self.description = description
-        self.products: List[Product] = products if products is not None else []
+
+        if products is not None:
+            self.products: List[Product] = products
+        else:
+            self.products: List[Product] = []
 
         Category.category_count += 1
         Category.product_count += len(self.products)

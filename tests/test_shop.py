@@ -43,11 +43,16 @@ def test_multiple_categories_counters():
     c1 = Category("Одежда", "Футболки")
     c2 = Category("Обувь", "Кроссовки")
 
+    assert c1.name == "Одежда"
+    assert c2.name == "Обувь"
+
     assert Category.category_count == 2
     assert Category.product_count == 0
 
     p = Product("Кеды", "Синие кеды", 5000.0, 20)
     c3 = Category("Спорт", "Инвентарь", [p])
+
+    assert c3.name == "Спорт"
 
     assert Category.category_count == 3
     assert Category.product_count == 1
