@@ -117,42 +117,30 @@ def get_transactions() -> List[Dict[str, Any]]:
         return []
 
 
-def cashback_categories(df: pd.DataFrame) -> List[Dict[str, Any]]:
-    """
-    Возвращает топ-3 категории по размеру кешбэка (5% от суммы трат).
-    Сортировка — по убыванию кешбэка.
-    """
-    if df.empty:
+def cashback_categories(df: pd.DataFrame) -> list[dict]:
+    AMOUNT_COL = "Сумма в валюте счёта"
+    CATEGORY_COL = "Категория по-умолчанию"
+
+    # Оставляем только расходы (отрицательные суммы)
+    expenses_df = df[df[AMOUNT_COL] < 0].copy()
+    if expenses_df.empty:
         return []
 
-    amount_col = "Сумма в валюте счёта"
-    category_col = "Категория по-умолчанию"
+    grouped = expenses_df.groupby(CATEGORY_COL)[AMOUNT_COL].sum()
 
-    missing_cols = [col for col in [amount_col, category_col] if col not in df.columns]
-    if missing_cols:
-        logger.error("Отсутствуют необходимые колонки: %s", missing_cols)
-        return []
+    result = []
+    for cat, total in grouped.items():
+        # total уже отрицательный, поэтому берём abs для кешбэка
+        cashback = abs(total) * 0.05
+        result.append({
+            "category": cat,
+            "total_spent": float(total),
+            "cashback": round(cashback, 2),
+            "rate": "5%"
+        })
 
-    grouped = (
-        df.groupby(category_col)[amount_col]
-        .sum()
-        .reset_index(name="total_spent")
-    )
+    # Сортируем по кешбэку (по убыванию)
+    result.sort(key=lambda x: x["cashback"], reverse=True)
 
-    grouped["abs_spent"] = grouped["total_spent"].abs()
-    grouped["cashback"] = grouped["abs_spent"] * 0.05
-    grouped = grouped.sort_values(by="cashback", ascending=False)
-
-    top_3 = grouped.head(3)
-
-    result = [
-        {
-            "category": row[category_col],
-            "total_spent": row["total_spent"],
-            "cashback": row["cashback"],
-            "rate": "5%",
-        }
-        for _, row in top_3.iterrows()
-    ]
-
-    return result
+    # Возвращаем только топ‑3
+    return result[:3]
