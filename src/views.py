@@ -1,74 +1,176 @@
+"""Веб-страницы «Главная» и «События»: генерация JSON-ответов."""
 import json
 import logging
 from datetime import datetime
-from typing import List, Dict, Any, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
+import requests
+from dotenv import load_dotenv
 
-from src.utils import get_transactions
+from src.utils import get_greeting, get_transactions, get_user_settings
+
+load_dotenv()
 
 logger = logging.getLogger(__name__)
 
+CARD_COL = "Номер карты"
 DATE_COL = "Дата операции"
 AMOUNT_COL = "Сумма в валюте счёта"
 CATEGORY_COL = "Категория по-умолчанию"
+DESC_COL = "Описание"
+
+SPECIAL_CATEGORIES = ("Наличные", "Переводы")
 
 
-def main_page(data: Optional[List[Dict[str, Any]]] = None) -> str:
-    logger.info("Формирование страницы Главная")
+def filter_by_period(df: pd.DataFrame, dt: datetime) -> pd.DataFrame:
+    """Оставляет транзакции с начала месяца входящей даты по саму дату включительно."""
+    start = dt.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    mask = (df[DATE_COL] >= start) & (df[DATE_COL] <= dt)
+    return df.loc[mask].copy()
 
-    # Если передали данные — используем их, иначе берём из утилиты
-    if data is None:
-        raw_data = get_transactions()
-    else:
-        raw_data = data
 
-    # Защита от неправильного типа данных (если вдруг передали строку или None)
-    if not isinstance(raw_data, list):
-        logger.warning("Получен неверный тип данных в main_page. Используем заглушку.")
-        raw_data = get_transactions()
+def cards_stats(transactions: List[Dict[str, Any]], dt: datetime) -> List[Dict[str, Any]]:
+    """По каждой карте: общая сумма расходов и кешбэк (1 рубль на каждые 100)."""
+    df = pd.DataFrame(transactions)
+    df = filter_by_period(df, dt)
+    df = df[df[AMOUNT_COL] < 0]  # только расходы
+    result = []
+    for card, group in df.groupby(CARD_COL):
+        total = abs(group[AMOUNT_COL].sum())
+        result.append(
+            {
+                "last_digits": str(card).replace("*", "")[-4:],
+                "total_spent": round(total, 2),
+                "cashback": round(total / 100, 2),
+            }
+        )
+    return result
 
-    if not raw_data:
-        return json.dumps({
-            "expenses": 0.0,
-            "income": 0.0,
-            "cashback": 0.0,
-            "currency_rates": {"USD": 90.0, "EUR": 98.0},
-            "stock_prices": {"AAPL": 180.0, "MSFT": 350.0},
-        }, ensure_ascii=False)
 
-    df = pd.DataFrame(raw_data)
+def top_transactions(
+    transactions: List[Dict[str, Any]], dt: datetime, n: int = 5
+) -> List[Dict[str, Any]]:
+    """Топ-5 транзакций по убыванию суммы платежа (amount)."""
+    df = pd.DataFrame(transactions)
+    df = filter_by_period(df, dt)
+    top = df.sort_values(AMOUNT_COL, ascending=False).head(n)
+    return [
+        {
+            "date": row[DATE_COL].strftime("%d.%m.%Y"),
+            "amount": row[AMOUNT_COL],
+            "category": row[CATEGORY_COL],
+            "description": row[DESC_COL],
+        }
+        for _, row in top.iterrows()
+    ]
 
-    # Ищем колонку суммы, если вдруг название отличается
-    amount_col = AMOUNT_COL
-    if amount_col not in df.columns:
-        possible_cols = [c for c in df.columns if "сумма" in str(c).lower()]
-        if possible_cols:
-            amount_col = possible_cols[0]
-        else:
-            logger.error(f"Колонка суммы не найдена. Доступные: {list(df.columns)}")
-            return json.dumps({"error": "Не найдена колонка суммы"}, ensure_ascii=False)
 
-    amounts = df[amount_col]
-    expenses = float(amounts[amounts < 0].sum()) if not amounts[amounts < 0].empty else 0.0
-    income = float(amounts[amounts > 0].sum()) if not amounts[amounts > 0].empty else 0.0
-    cashback = abs(expenses) * 0.05
+def get_currency_rates(currencies: List[str]) -> List[Dict[str, Any]]:
+    """Получает курсы валют через бесплатный API open.er-api.com.
 
-    result = {
-        "expenses": expenses,
-        "income": income,
-        "cashback": cashback,
-        "currency_rates": {
-            "USD": 90.0,
-            "EUR": 98.0,
-        },
-        "stock_prices": {
-            "AAPL": 180.0,
-            "MSFT": 350.0,
-        },
+    Возвращает список {currency, rate}, где rate — рублей за единицу валюты.
+    При ошибке API — пустой список.
+    """
+    rates: List[Dict[str, Any]] = []
+    try:
+        response = requests.get("https://open.er-api.com/v6/latest/USD", timeout=10)
+        response.raise_for_status()
+        base_rates = response.json().get("rates", {})
+        rub_per_usd = base_rates.get("RUB")
+        if not rub_per_usd:
+            logger.warning("Курс RUB не найден в ответе API")
+            return rates
+        for currency in currencies:
+            rate = base_rates.get(currency)
+            if rate:
+                rub_per_unit = rub_per_usd / rate  # рублей за единицу валюты
+                rates.append({"currency": currency, "rate": round(rub_per_unit, 2)})
+            else:
+                logger.warning("Курс для валюты %s не найден", currency)
+    except requests.RequestException:
+        logger.exception("Ошибка запроса курсов валют")
+    return rates
+
+
+def get_stock_prices(stocks: List[str]) -> List[Dict[str, Any]]:
+    """Получает цены акций через публичный API Yahoo Finance (без ключа).
+
+    Возвращает список {stock, price}. При ошибке API — пустой список.
+    """
+    prices: List[Dict[str, Any]] = []
+    for stock in stocks:
+        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{stock}"
+        try:
+            response = requests.get(
+                url,
+                params={"interval": "1d", "range": "5d"},
+                headers={"User-Agent": "Mozilla/5.0"},
+                timeout=10,
+            )
+            response.raise_for_status()
+            result = response.json().get("chart", {}).get("result", [])
+            if result:
+                price = result[0]["meta"].get("regularMarketPrice")
+                if price is not None:
+                    prices.append({"stock": stock, "price": round(float(price), 2)})
+                    continue
+            logger.warning("Цена для акции %s не найдена", stock)
+        except requests.RequestException:
+            logger.exception("Ошибка запроса цены акции %s", stock)
+    return prices
+
+
+def main_page(datetime_str: str) -> str:
+    """Главная функция: принимает 'YYYY-MM-DD HH:MM:SS', возвращает JSON-строку."""
+    dt = datetime.strptime(datetime_str, "%Y-%m-%d %H:%M:%S")
+    logger.info("Главная страница для даты %s", datetime_str)
+
+    transactions = get_transactions()
+    settings = get_user_settings()
+    currencies: List[str] = settings.get("user_currencies", [])
+    stocks: List[str] = settings.get("user_stocks", [])
+
+    response = {
+        "greeting": get_greeting(dt),
+        "cards": cards_stats(transactions, dt),
+        "top_transactions": top_transactions(transactions, dt),
+        "currency_rates": get_currency_rates(currencies),
+        "stock_prices": get_stock_prices(stocks),
     }
+    return json.dumps(response, ensure_ascii=False, indent=2)
 
-    return json.dumps(result, ensure_ascii=False)
+
+def get_period_range(period: str, dt: datetime) -> Tuple[pd.Timestamp, pd.Timestamp]:
+    """Начало и конец диапазона для страницы «События».
+
+    W — неделя даты (с понедельника), M — месяц, Y — год.
+    """
+    if period == "W":
+        start = dt - pd.Timedelta(days=dt.dayofweek)
+    elif period == "Y":
+        start = dt.replace(month=1, day=1)
+    else:  # M — по умолчанию
+        start = dt.replace(day=1)
+    return (
+        pd.Timestamp(start.replace(hour=0, minute=0, second=0, microsecond=0)),
+        pd.Timestamp(dt),
+    )
+
+
+def top_categories(frame: pd.DataFrame, top_n: int = 7) -> List[Dict[str, Any]]:
+    """Топ-N категорий по убыванию суммы, остальные — в «Остальное»."""
+    if frame.empty:
+        return []
+    sums = frame.groupby(CATEGORY_COL)["amount"].sum().sort_values(ascending=False)
+    items = [
+        {"category": category, "amount": round(value)}
+        for category, value in sums.head(top_n).items()
+    ]
+    rest = sums.iloc[top_n:].sum()
+    if rest:
+        items.append({"category": "Остальное", "amount": int(round(rest))})
+    return items
 
 
 def events_page(
@@ -76,84 +178,52 @@ def events_page(
     period: str = "M",
     data: Optional[List[Dict[str, Any]]] = None,
 ) -> str:
+    """Страница «События»: JSON с расходами, поступлениями, курсами и акциями.
+
+    period: 'W' — неделя, 'M' — месяц (по умолчанию), 'Y' — год,
+    'ALL' — все данные до указанной даты.
+    """
     dt = datetime.strptime(datetime_str, "%Y-%m-%d %H:%M:%S")
     if period not in ("W", "M", "Y", "ALL"):
         raise ValueError(f"Неподдерживаемый период: {period}")
-
     logger.info("События для даты %s, диапазон %s", datetime_str, period)
 
-    raw_data = data if data is not None else get_transactions()
-    if not isinstance(raw_data, list):
-        raw_data = []
+    df = pd.DataFrame(data if data is not None else get_transactions())
 
-    if not raw_data:
-        return json.dumps({"events": [], "period": period}, ensure_ascii=False)
+    if df.empty:
+        response = {
+            "expenses": {"total_amount": 0, "main": [], "transfers_and_cash": []},
+            "income": {"total_amount": 0, "main": []},
+        }
+        return json.dumps(response, ensure_ascii=False, indent=2)
 
-    df = pd.DataFrame(raw_data)
+    if period == "ALL":
+        mask = df[DATE_COL] <= pd.Timestamp(dt)
+    else:
+        start, end = get_period_range(period, dt)
+        mask = (df[DATE_COL] >= start) & (df[DATE_COL] <= end)
+    df = df.loc[mask]
 
-    # Ищем колонки, если названия отличаются
-    date_col = DATE_COL
-    amount_col = AMOUNT_COL
-    category_col = CATEGORY_COL
+    expenses_df = df[df[AMOUNT_COL] < 0].copy()
+    expenses_df["amount"] = expenses_df[AMOUNT_COL].abs()
+    income_df = df[df[AMOUNT_COL] > 0].copy()
+    income_df["amount"] = income_df[AMOUNT_COL]
 
-    if date_col not in df.columns:
-        date_candidates = [c for c in df.columns if "дата" in str(c).lower()]
-        if date_candidates:
-            date_col = date_candidates[0]
+    main_expenses = expenses_df[~expenses_df[CATEGORY_COL].isin(SPECIAL_CATEGORIES)]
+    special_expenses = expenses_df[expenses_df[CATEGORY_COL].isin(SPECIAL_CATEGORIES)]
 
-    if amount_col not in df.columns:
-        amount_candidates = [c for c in df.columns if "сумма" in str(c).lower()]
-        if amount_candidates:
-            amount_col = amount_candidates[0]
-
-    if category_col not in df.columns:
-        category_candidates = [c for c in df.columns if "категор" in str(c).lower()]
-        if category_candidates:
-            category_col = category_candidates[0]
-
-    if date_col in df.columns:
-        df[date_col] = pd.to_datetime(df[date_col], errors="coerce")
-
-    filtered_df = df
-    if (
-        not df.empty
-        and date_col in df.columns
-        and pd.api.types.is_datetime64_any_dtype(df[date_col])
-    ):
-        if period == "W":
-            start = dt - pd.Timedelta(days=7)
-            end = dt
-        elif period == "M":
-            start = pd.Timestamp(dt).replace(day=1)
-            next_month = start + pd.offsets.MonthBegin(1)
-            end = next_month - pd.Timedelta(seconds=1)
-        elif period == "Y":
-            start = pd.Timestamp(dt).replace(month=1, day=1)
-            next_year = start + pd.offsets.YearBegin(1)
-            end = next_year - pd.Timedelta(seconds=1)
-        else:  # ALL
-            start = df[date_col].min()
-            end = df[date_col].max()
-
-        mask = (df[date_col] >= start) & (df[date_col] <= end)
-        filtered_df = df.loc[mask].copy()
-
-    events_list = []
-    if category_col in filtered_df.columns and amount_col in filtered_df.columns:
-        grouped = filtered_df.groupby(category_col)[amount_col].sum()
-        for cat, total in grouped.items():
-            events_list.append({
-                "category": cat,
-                "total": float(total),
-                "type": "expense" if total < 0 else "income"
-            })
-
+    settings = get_user_settings()
     response = {
-        "reference_datetime": datetime_str,
-        "period": period,
-        "events": events_list,
-        "summary_total": float(filtered_df[amount_col].sum())
-        if amount_col in filtered_df.columns
-        else 0.0,
+        "expenses": {
+            "total_amount": int(round(expenses_df["amount"].sum())),
+            "main": top_categories(main_expenses),
+            "transfers_and_cash": top_categories(special_expenses),
+        },
+        "income": {
+            "total_amount": int(round(income_df["amount"].sum())),
+            "main": top_categories(income_df),
+        },
+        "currency_rates": get_currency_rates(settings.get("user_currencies", [])),
+        "stock_prices": get_stock_prices(settings.get("user_stocks", [])),
     }
-    return json.dumps(response, ensure_ascii=False)
+    return json.dumps(response, ensure_ascii=False, indent=2)
