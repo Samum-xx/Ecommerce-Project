@@ -252,3 +252,10 @@ exclude = .venv, .git, __pycache__
 ## Стек
 
 Python 3.12, pandas, openpyxl, requests, python-dotenv, pytest, flake8.
+
+
+## Fixes (Oct 2026)
+- Удалён дубликат "cashback_categories" из "utils.py"; каноничная реализация — в "services.py" (совпадает с тестами).
+- CLI теперь корректно формирует топ‑3 на основе этой реализации.
+- Исправлен формат аргумента месяца для команды "invest" (строка "YYYY-MM").
+- Все тесты проходят.

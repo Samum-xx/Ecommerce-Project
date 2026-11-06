@@ -12,15 +12,13 @@ from src.reports import (
     spending_by_workday,
 )
 from src.services import (
+    cashback_categories,
     investment_bank,
     phone_number_search,
     search_transactions,
     transfers_to_individuals,
 )
-from src.utils import (
-    get_transactions,
-    cashback_categories,
-)
+from src.utils import get_transactions
 from src.views import main_page, events_page
 
 logger = logging.getLogger(__name__)
@@ -98,26 +96,18 @@ def run(command: str, args: argparse.Namespace) -> str | float:
             logger.error("--year и --month должны быть целыми числами. Ошибка: %s", e)
             raise ValueError("--year и --month должны быть числами (например, --year 2024 --month 7)")
 
-        df = load_dataframe()
-        if df.empty:
-            logger.warning("Нет транзакций для расчёта кешбэка")
-            return json.dumps([], ensure_ascii=False, indent=2)
+        result = cashback_categories(get_transactions(), year, month)
+        data = json.loads(result)
+        if not data:
+            return result
 
-        if DATE_COL not in df.columns:
-            logger.error(f"Колонка '{DATE_COL}' не найдена. Доступные: {list(df.columns)}")
-            return json.dumps([], ensure_ascii=False, indent=2)
-
-        df[DATE_COL] = pd.to_datetime(df[DATE_COL], errors="coerce")
-        df = df.dropna(subset=[DATE_COL])
-
-        df_filtered = df[(df[DATE_COL].dt.year == year) & (df[DATE_COL].dt.month == month)]
-
-        if df_filtered.empty:
-            logger.info(f"Нет транзакций за {year}-{month:02d}")
-            return json.dumps([], ensure_ascii=False, indent=2)
-
-        result = cashback_categories(df_filtered)
-        return json.dumps(result, ensure_ascii=False, indent=2)
+        # Для CLI показываем топ-3 категории по кешбэку
+        top = sorted(data.items(), key=lambda kv: kv[1], reverse=True)[:3]
+        return json.dumps(
+            [{"category": cat, "cashback": value} for cat, value in top],
+            ensure_ascii=False,
+            indent=2,
+        )
 
     # --- INVEST ---
     if command == "invest":
@@ -202,7 +192,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--category", help="Категория для отчёта")
     parser.add_argument("--query", help="Строка поиска для команды search")
     parser.add_argument("--year", type=int, help="Год для сервиса кешбэка")
-    parser.add_argument("--month", type=int, help="Месяц для сервиса кешбэка")
+    parser.add_argument(
+        "--month",
+        default=None,
+        help="Месяц: для cashback — число (например, 7), для invest — 'YYYY-MM'",
+    )
     parser.add_argument("--limit", type=int, default=10, help="Лимит записей для invest")
 
     args = parser.parse_args()
