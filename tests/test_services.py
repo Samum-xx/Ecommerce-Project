@@ -4,13 +4,9 @@ from datetime import datetime
 
 import pytest
 
-from src.services import (
-    cashback_categories,
-    investment_bank,
-    phone_number_search,
-    search_transactions,
-    transfers_to_individuals,
-)
+from src.services import (cashback_categories, investment_bank,
+                          phone_number_search, search_transactions,
+                          transfers_to_individuals)
 
 
 @pytest.fixture

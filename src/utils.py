@@ -3,15 +3,27 @@ import os
 from datetime import datetime
 from typing import Any, Dict, List
 
+import logging
+import os
+from datetime import datetime
+from typing import Any, Dict, List
+
 import pandas as pd
+from dotenv import load_dotenv
+
+load_dotenv()
 
 logger = logging.getLogger(__name__)
 
-# Путь к файлу Excel (относительно папки src)
-FILE_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "operations.xlsx")
+# Путь к Excel: сначала пробуем из .env, если нет — берём operations.xlsx из текущей папки (src)
+FILE_PATH = os.getenv(
+    "EXCEL_PATH",
+    os.path.join(os.path.dirname(__file__), "operations.xlsx"),
+)
 
 
-def get_greeting(name: str, current_time: datetime) -> str:
+def get_greeting(current_time: datetime) -> str:
+    """Возвращает приветствие по времени суток."""
     hour = current_time.hour
     if 6 <= hour < 12:
         return "Доброе утро"

@@ -1,9 +1,10 @@
 """Декоратор для функций-отчётов: сохраняет результат в файл."""
-import pandas as pd
 import functools
 import json
 import os
 from typing import Any, Callable
+
+import pandas as pd
 
 DEFAULT_REPORT_PATH = os.path.join("reports", "report_output.json")
 

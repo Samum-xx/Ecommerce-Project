@@ -1,20 +1,6 @@
-"""Точка входа: запуск страниц и сервисов через командную строку.
-
-Примеры запуска:
-    python -m src.main main "2024-07-30 18:00:00"
-    python -m src.main events "2024-07-30 18:00:00" --period M
-    python -m src.main cashback --year 2024 --month 7
-    python -m src.main invest --month 2024-07 --limit 50
-    python -m src.main transfers "2024-07-30 18:00:00"
-    python -m src.main recipients "2024-07-30 18:00:00"
-    python -m src.main search "Лента"
-    python -m src.main phones
-    python -m src.main category --category Переводы "2024-07-30 18:00:00"
-    python -m src.main weekday "2024-07-30 18:00:00"
-    python -m src.main workday "2024-07-30 18:00:00"
-"""
 import argparse
 import json
+import logging
 import sys
 from datetime import datetime, timedelta
 
@@ -26,26 +12,39 @@ from src.reports import (
     spending_by_workday,
 )
 from src.services import (
-    cashback_categories,
     investment_bank,
     phone_number_search,
     search_transactions,
     transfers_to_individuals,
 )
-from src.utils import get_transactions
-from src.views import events_page, main_page
+from src.utils import (
+    get_transactions,
+    cashback_categories,
+)
+from src.views import main_page, events_page
+
+logger = logging.getLogger(__name__)
 
 DATE_COL = "Дата операции"
 
 
 def load_dataframe() -> pd.DataFrame:
     """Читает транзакции и возвращает их в виде датафрейма."""
-    return pd.DataFrame(get_transactions())
+    try:
+        records = get_transactions()
+        if not records:
+            return pd.DataFrame()
+        return pd.DataFrame(records)
+    except Exception as e:
+        logger.error("Не удалось загрузить DataFrame: %s", e)
+        raise
 
 
 def month_bounds(date_str: str) -> tuple:
     """Возвращает (начало месяца, конец месяца) по строке с датой."""
-    dt = datetime.strptime(date_str[:10], "%Y-%m-%d")
+    # Берем только первые 10 символов (YYYY-MM-DD), если время есть
+    dt_str = date_str[:10]
+    dt = datetime.strptime(dt_str, "%Y-%m-%d")
     start = dt.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     if dt.month == 12:
         first_next = dt.replace(year=dt.year + 1, month=1, day=1)
@@ -59,14 +58,14 @@ def top_recipients_json(items: list) -> str:
     """Агрегирует переводы и возвращает топ-5 получателей JSON-строкой."""
     totals = {}
     for item in items:
-        info = totals.setdefault(
-            item["recipient"], {"total": 0.0, "count": 0}
-        )
-        info["total"] += item["amount"]
+        # Защита: если нет recipient, пропускаем
+        rec = item.get("recipient")
+        if not rec:
+            continue
+        info = totals.setdefault(rec, {"total": 0.0, "count": 0})
+        info["total"] += float(item.get("amount", 0))
         info["count"] += 1
-    ranked = sorted(
-        totals.items(), key=lambda kv: kv[1]["total"], reverse=True
-    )
+    ranked = sorted(totals.items(), key=lambda kv: kv[1]["total"], reverse=True)
     top = []
     for name, info in ranked[:5]:
         top.append({
@@ -79,34 +78,62 @@ def top_recipients_json(items: list) -> str:
 
 def run(command: str, args: argparse.Namespace) -> str | float:
     """Выполняет выбранную команду и возвращает результат."""
+
+    # --- ГЛАВНАЯ СТРАНИЦА ---
     if command == "main":
-        return main_page(args.date)
+        date_val = args.date if args.date else datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        return main_page(date_val)
 
+    # --- СОБЫТИЯ ---
     if command == "events":
-        return events_page(args.date, period=args.period)
+        date_val = args.date if args.date else datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        return events_page(date_val, period=args.period)
 
+    # --- CASHBACK ---
     if command == "cashback":
         try:
-            month_number = int(args.month)
-        except ValueError:
-            raise ValueError(
-                "--month для cashback должен быть номером месяца,"
-                " например 7"
-            )
-        return cashback_categories(get_transactions(), args.year,
-                                   month_number)
+            year = int(args.year)
+            month = int(args.month)
+        except (ValueError, TypeError) as e:
+            logger.error("--year и --month должны быть целыми числами. Ошибка: %s", e)
+            raise ValueError("--year и --month должны быть числами (например, --year 2024 --month 7)")
 
+        df = load_dataframe()
+        if df.empty:
+            logger.warning("Нет транзакций для расчёта кешбэка")
+            return json.dumps([], ensure_ascii=False, indent=2)
+
+        if DATE_COL not in df.columns:
+            logger.error(f"Колонка '{DATE_COL}' не найдена. Доступные: {list(df.columns)}")
+            return json.dumps([], ensure_ascii=False, indent=2)
+
+        df[DATE_COL] = pd.to_datetime(df[DATE_COL], errors="coerce")
+        df = df.dropna(subset=[DATE_COL])
+
+        df_filtered = df[(df[DATE_COL].dt.year == year) & (df[DATE_COL].dt.month == month)]
+
+        if df_filtered.empty:
+            logger.info(f"Нет транзакций за {year}-{month:02d}")
+            return json.dumps([], ensure_ascii=False, indent=2)
+
+        result = cashback_categories(df_filtered)
+        return json.dumps(result, ensure_ascii=False, indent=2)
+
+    # --- INVEST ---
     if command == "invest":
         transactions = []
         for record in get_transactions():
-            dt = pd.to_datetime(record[DATE_COL]).strftime("%Y-%m-%d")
-            amount = record.get(
-                "Сумма операции", record.get("Сумма в валюте счёта", 0)
-            )
-            transactions.append({"Дата операции": dt,
-                                 "Сумма операции": amount})
+            dt_val = record.get(DATE_COL)
+            if isinstance(dt_val, datetime):
+                dt_str = dt_val.strftime("%Y-%m-%d")
+            else:
+                dt_str = str(dt_val)[:10] if dt_val else ""
+
+            amount = record.get("Сумма операции", record.get("Сумма в валюте счёта", 0))
+            transactions.append({"Дата операции": dt_str, "Сумма операции": amount})
         return investment_bank(args.month, transactions, args.limit)
 
+    # --- TRANSFERS / RECIPIENTS ---
     if command == "transfers":
         if args.date:
             start, end = month_bounds(args.date)
@@ -114,85 +141,91 @@ def run(command: str, args: argparse.Namespace) -> str | float:
         return transfers_to_individuals(get_transactions())
 
     if command == "recipients":
+        if not args.date:
+            # Если даты нет, берем текущую
+            args.date = datetime.now().strftime("%Y-%m-%d 00:00:00")
         start, end = month_bounds(args.date)
         filtered = transfers_to_individuals(get_transactions(), start, end)
-        return top_recipients_json(json.loads(filtered))
+        try:
+            json_data = json.loads(filtered)
+            return top_recipients_json(json_data)
+        except json.JSONDecodeError:
+            logger.error("Не удалось распарсить результат transfers_to_individuals")
+            return filtered
 
+    # --- SEARCH / PHONES ---
     if command == "search":
         return search_transactions(args.query, get_transactions())
 
     if command == "phones":
         return phone_number_search(get_transactions())
 
+    # --- ОТЧЕТЫ (ТАБЛИЦЫ) ---
     df = load_dataframe()
     if command == "category":
-        return spending_by_category(df, args.category,
-                                    args.date).to_string(index=False)
+        res = spending_by_category(df, args.category, args.date)
+        return res.to_string(index=False) if isinstance(res, pd.DataFrame) else str(res)
+
     if command == "weekday":
-        return spending_by_weekday(df, args.date).to_string(index=False)
+        res = spending_by_weekday(df, args.date)
+        return res.to_string(index=False) if isinstance(res, pd.DataFrame) else str(res)
+
     if command == "workday":
-        return spending_by_workday(df, args.date).to_string(index=False)
+        res = spending_by_workday(df, args.date)
+        return res.to_string(index=False) if isinstance(res, pd.DataFrame) else str(res)
+
     raise ValueError(f"Неизвестная команда: {command}")
 
 
+def command_needs_date(command: str) -> bool:
+    return command in ("main", "events", "recipients", "category", "weekday", "workday")
+
+
 def parse_args() -> argparse.Namespace:
-    """Разбирает аргументы командной строки."""
-    parser = argparse.ArgumentParser(
-        description="Веб-приложение «Анализ транзакций»"
-    )
+    parser = argparse.ArgumentParser(description="Веб-приложение «Анализ транзакций»")
     parser.add_argument(
         "command",
-        choices=["main", "events", "cashback", "invest", "transfers",
-                 "recipients", "search", "phones", "category",
-                 "weekday", "workday"],
+        choices=[
+            "main", "events", "cashback", "invest", "transfers",
+            "recipients", "search", "phones", "category",
+            "weekday", "workday"
+        ],
     )
-    parser.add_argument("date_pos", nargs="?", default=None,
-                        help="Дата позицией: YYYY-MM-DD HH:MM:SS")
-    parser.add_argument("--date", dest="date_opt", default=None,
-                        help="Дата опцией: YYYY-MM-DD HH:MM:SS")
-    parser.add_argument("--period", default="M",
-                        help="Диапазон для events: W, M, Y или ALL")
+    parser.add_argument(
+        "date_pos",
+        nargs="?",
+        default=None,
+        help="Дата позицией: YYYY-MM-DD HH:MM:SS",
+    )
+    parser.add_argument("--date", dest="date_opt", default=None, help="Дата опцией")
+    parser.add_argument("--period", default="M", help="Диапазон для events: W, M, Y или ALL")
     parser.add_argument("--category", help="Категория для отчёта")
     parser.add_argument("--query", help="Строка поиска для команды search")
     parser.add_argument("--year", type=int, help="Год для сервиса кешбэка")
-    parser.add_argument(
-        "--month",
-        help="Месяц: номер для cashback, YYYY-MM для invest",
-    )
-    parser.add_argument("--limit", type=int, default=50,
-                        help="Порог округления Инвесткопилки: 10, 50 или 100")
+    parser.add_argument("--month", type=int, help="Месяц для сервиса кешбэка")
+    parser.add_argument("--limit", type=int, default=10, help="Лимит записей для invest")
+
     args = parser.parse_args()
 
-    args.date = args.date_opt or args.date_pos
-    if args.command == "search" and args.date_pos and not args.query:
-        args.query = args.date_pos  # допускаем: search "Лента"
-    if command_needs_date(args.command) and not args.date:
-        parser.error(f"для команды {args.command} укажите дату")
-    if args.command == "cashback" and (not args.year or not args.month):
-        parser.error("для команды cashback укажите --year и --month")
-    if args.command == "invest" and not args.month:
-        parser.error("для команды invest укажите --month в формате YYYY-MM")
-    if args.command == "category" and not args.category:
-        parser.error("для команды category укажите --category")
-    if args.command == "search" and not args.query:
-        parser.error("для команды search укажите --query")
+    # Объединяем позиционную дату и опцию
+    if args.date_pos:
+        args.date = args.date_pos
+    elif args.date_opt:
+        args.date = args.date_opt
+    elif command_needs_date(args.command):
+        args.date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
     return args
 
 
-def command_needs_date(command: str) -> bool:
-    """Команды, которым обязательна дата."""
-    return command in ("main", "events", "recipients", "category",
-                       "weekday", "workday")
-
-
-def main() -> None:
-    args = parse_args()
+def main():
     try:
+        args = parse_args()
         result = run(args.command, args)
-    except ValueError as e:
-        print(f"Ошибка: {e}", file=sys.stderr)
+        print(result)
+    except Exception as e:
+        logger.exception("Произошла ошибка при выполнении команды: %s", e)
         sys.exit(1)
-    print(result)
 
 
 if __name__ == "__main__":
